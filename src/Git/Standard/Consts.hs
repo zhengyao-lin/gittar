@@ -13,3 +13,5 @@ constConfigCoreSectionVersion = "repositoryformatversion"
 
 constErrorDirectoryNotFound path = printf "directory not found: %s" path
 constErrorFileNotFound path = printf "file not found: %s" path
+constErrorFailedParseObject path err = printf "failed to parse object %s: %s" path err
+constErrorFailedDecompressObject path = printf "failed to decompress object %s" path

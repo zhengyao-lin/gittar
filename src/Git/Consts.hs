@@ -9,5 +9,10 @@ constObjectBlobHeader = "blob"
 constObjectTreeHeader = "tree"
 constObjectCommitHeader = "commit"
 
+constCommitHeaderTree = "tree"
+constCommitHeaderParent = "parent"
+constCommitHeaderAuthor = "author"
+constCommitHeaderCommitter = "committer"
+
 constErrorNoSuchObjectType header = printf "no such object type %s" header
 constErrorWrongTimestamp = "wrong timestamp format"

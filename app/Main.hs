@@ -3,11 +3,12 @@
 module Main where
 
 import Data.Time
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BS
 
 import Control.Monad.State
 
 import Text.Parsec
+import Text.Printf
 
 import Git.Object
 import Git.Repo
@@ -40,7 +41,7 @@ main = do
 
     putStrLn (show $ hashObject commit)
 
-    case parse parseObject "commit" encoded of
+    case parseObject encoded of
         Right obj -> putStrLn (show obj)
         Left obj -> putStrLn (show obj)
 
@@ -50,7 +51,7 @@ test = do
 
     let Just decompressed = zlibDecompress cont
 
-    case parse parseObject "haha" decompressed of
+    case parseObject decompressed of
         Right obj -> putStrLn (show obj)
         Left obj -> putStrLn (show obj)
 
@@ -60,34 +61,38 @@ test = do
     
     let operations :: IO [ObjectHash]
         operations = flip evalStateT repo $ do
-            file <- addObject (Blob "hey\n")
+            -- file <- addObject (Blob "hey\n")
 
-            tree <- addObject (Tree [
-                    TreeEntry 100644 "new-file" file,
-                    TreeEntry 100644 "new-file-same" file
-                ])
+            -- tree <- addObject (Tree [
+            --         TreeEntry 100644 "new-file" file,
+            --         TreeEntry 100644 "new-file-same" file
+            --     ])
 
-            now <- liftIO getZonedTime
+            -- now <- liftIO getZonedTime
 
-            commit <- addObject (Commit {
-                    commitTree = tree,
-                    commitParent = Nothing,
-                    commitAuthor = UserStamp "zhengyao <nobody@illinois.edu>" now,
-                    commitIssuer = UserStamp "zhengyao <nobody@illinois.edu>" now,
-                    commitMsg = "not me"
-                })
+            -- commit <- addObject (Commit {
+            --         commitTree = tree,
+            --         commitParent = Nothing,
+            --         commitAuthor = UserStamp "zhengyao <nobody@illinois.edu>" now,
+            --         commitIssuer = UserStamp "zhengyao <nobody@illinois.edu>" now,
+            --         commitMsg = "not me"
+            --     })
 
-            commit <- addObject (Commit {
-                    commitTree = tree,
-                    commitParent = Just commit,
-                    commitAuthor = UserStamp "rod-lin <zl38@illinois.edu>" now,
-                    commitIssuer = UserStamp "rod-lin <zl38@illinois.edu>" now,
-                    commitMsg = "not you"
-                })
-                
+            -- commit <- addObject (Commit {
+            --         commitTree = tree,
+            --         commitParent = Just commit,
+            --         commitAuthor = UserStamp "rod-lin <zl38@illinois.edu>" now,
+            --         commitIssuer = UserStamp "rod-lin <zl38@illinois.edu>" now,
+            --         commitMsg = "not you"
+            --     })
+
+            Just (Blob file) <- getObject (read "6c5d4031e03408e34ae476c5053ee497a91ac37b")
+            
+            liftIO $ putStrLn (printf "file size %d" (BS.length file))
+
             listObjects
 
-    -- lists <- operations
-    -- putStrLn (show lists)
+    lists <- operations
+    putStrLn (show lists)
 
     return ()

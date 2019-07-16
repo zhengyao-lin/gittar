@@ -1,17 +1,22 @@
 module Git.Object where
 
 import Data.Time
-import Data.List
+import Data.List as List
 import Data.Monoid
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BS
 import Data.Hashable
-import Data.Char
+import qualified Data.Char as Char
 import Data.List.Split
+import Data.Attoparsec.ByteString.Lazy as P
+
+import Data.Ascii.Word8 (ascii, toChar)
+import Data.Word8
+
+import Debug.Trace
 
 import Crypto.Hash.SHA1 as SHA1
 
-import Text.Parsec
-import Text.Parsec.ByteString
+import Control.Applicative
 
 import Numeric
 
@@ -50,9 +55,9 @@ instance Show ObjectHash where
 
 instance Read ObjectHash where
     readsPrec _ input =
-        if length input == constHashLength * 2 && all isHexDigit input then
+        if length input == constHashLength * 2 && all Char.isHexDigit input then
             let raw =
-                    BS.pack $ flip map [0,2..constHashLength - 1] $ \i ->
+                    BS.pack $ flip map [0,2..constHashLength * 2 - 1] $ \i ->
                         let [(val, _)] = readHex [input !! i, input !! (i + 1)]
                         in fromIntegral val
             in [(ObjectHash raw, "")]
@@ -62,7 +67,7 @@ instance Hashable ObjectHash where
     hashWithSalt salt (ObjectHash hash) = hashWithSalt salt hash
 
 hashObject :: Object -> ObjectHash
-hashObject = ObjectHash . SHA1.hash . encodeObject
+hashObject = ObjectHash . toLazyByteString . SHA1.hashlazy . encodeObject
 
 -- encoders
 encodeObjectHash :: ObjectHash -> BS.ByteString
@@ -101,118 +106,130 @@ encodeObject (Commit {
     where
         parent = case mparent of
             Nothing -> []
-            Just hash -> ["parent " ++ show hash]
+            Just hash -> [constCommitHeaderParent ++ " " ++ show hash]
 
-        cont = fromString (headers ++ "\n\n" ++ msg ++ "\n")
+        cont = fromString (headers ++ "\n" ++ msg)
         
-        headers = intercalate "\n" $ [
-                "tree " ++ show tree
+        headers = unlines $ [
+                constCommitHeaderTree ++ " " ++ show tree
             ] ++ parent ++ [
-                "author " ++ encodeUserStamp author,
-                "committer " ++ encodeUserStamp committer
+                constCommitHeaderAuthor ++ " " ++ encodeUserStamp author,
+                constCommitHeaderCommitter ++ " " ++ encodeUserStamp committer
             ]
 
--- parsers
-parseBlobObject :: Parser Object
-parseBlobObject = fmap (Blob . fromString) (many anyChar)
-
-parseObjectHash :: Parser ObjectHash
-parseObjectHash = fmap (ObjectHash . fromString) (count constHashLength anyChar)
-
-parseTreeEntry :: Parser TreeEntry
-parseTreeEntry = do
-    mode <- many digit
-    space
-    file <- many (noneOf ['\0'])
-    char '\0'
-
-    hash <- parseObjectHash
-
-    return (TreeEntry (read mode) file hash)
-
-parseTreeObject :: Parser Object
-parseTreeObject = fmap Tree (many parseTreeEntry)
-
-parseCommitObject :: Parser Object
-parseCommitObject = do
-    tree <- treeP
-    mparent <- optionMaybe parentP
-
-    (author, committer) <- stampsP
-    msg <- manyTill anyChar eof
-
-    return (Commit tree mparent author committer msg)
+parseObject :: BS.ByteString -> Either String Object
+parseObject raw =
+    case parseOnly objectP (toStrictByteString raw) of
+        Right obj -> return obj
+        Left err -> fail err
 
     where
-        treeP = do
-            string "tree "
-            tree <- hashTextP
-            newline
-            return tree
+        digit = satisfy isDigit
+        hexDigit = satisfy isHexDigit
+        space = satisfy isSpace
+        letter = satisfy isAlpha
+        newline = satisfy (== ascii '\n')
+        stringRaw = string . toStrictByteString . fromString
 
-        parentP = do
-            string "parent "
-            hash <- hashTextP
-            newline
-            return hash
+        blobObjectP :: Parser Object
+        blobObjectP = fmap Blob takeLazyByteString
 
-        authorP = do
-            string "author "
-            stamp <- userStampP
-            return stamp
+        objectHashP :: Parser ObjectHash
+        objectHashP = fmap (ObjectHash . toLazyByteString) (P.take constHashLength)
 
-        committerP = do
-            string "committer "
-            stamp <- userStampP
-            return stamp
-
-        hashTextP = fmap read (count (constHashLength * 2) hexDigit)
-        userStampP = do
-            line <- manyTill anyChar newline
-
-            let separated = splitOn " " line
-            
-            if length separated >= 2 then
-                let info = take (length separated - 2) separated
-                    time = drop (length separated - 2) separated
-                in case parse timestampP "timestamp" (intercalate " " time) of
-                    Right time -> return (UserStamp (intercalate " " info) time)
-                    Left err -> fail (show err)
-            else
-                fail constErrorWrongTimestamp
-
-        timestampP = do
-            time_raw <- many digit
+        treeEntryP :: Parser TreeEntry
+        treeEntryP = do
+            mode <- map toChar <$> many digit
             space
-            sign <- char '+' <|> char '-'
-            zone_raw <- count 4 digit
+            file <- map toChar <$> many (notWord8 0)
+            word8 0
+
+            hash <- objectHashP
+
+            return (TreeEntry (read mode) file hash)
+
+        treeObjectP :: Parser Object
+        treeObjectP = fmap Tree (many treeEntryP)
+
+        commitObjectP :: Parser Object
+        commitObjectP = do
+            tree <- treeP
+            mparent <- fmap Just parentP <|> return Nothing
+
+            (author, committer) <- stampsP; newline
             
-            time <- parseTimeM True defaultTimeLocale "%s" time_raw
-            zone <- parseTimeM True defaultTimeLocale "%z" (sign:zone_raw)
+            msg <- takeLazyByteString
 
-            return time {
-                zonedTimeZone = zone
-            }
+            return (Commit tree mparent author committer (toString msg))
 
-        stampsP = (do
-                committer <- committerP; author <- authorP;
-                return (author, committer))
-              <|> (do
-                author <- authorP; committer <- committerP;
-                return (author, committer))
+            where
+                treeP = do
+                    stringRaw constCommitHeaderTree; space
+                    tree <- hashTextP; newline
+                    return tree
 
-parseObject :: Parser Object
-parseObject = do
-    header <- many letter
-    space
-    length <- many digit
-    char '\0'
+                parentP = do
+                    stringRaw constCommitHeaderParent; space
+                    hash <- hashTextP; newline
+                    return hash
 
-    if header == constObjectBlobHeader then
-        parseBlobObject
-    else if header == constObjectTreeHeader then
-        parseTreeObject
-    else if header == constObjectCommitHeader then
-        parseCommitObject
-    else
-        fail (constErrorNoSuchObjectType header)
+                authorP = do
+                    stringRaw constCommitHeaderAuthor; space
+                    stamp <- userStampP
+                    return stamp
+
+                committerP = do
+                    stringRaw constCommitHeaderCommitter; space
+                    stamp <- userStampP
+                    return stamp
+
+                hashTextP = fmap (read . map toChar) (count (constHashLength * 2) hexDigit)
+                userStampP = do
+                    line <- manyTill anyWord8 newline
+
+                    let separated = splitOn [ascii ' '] line
+                    
+                    if length separated >= 2 then
+                        let info = intercalate [ascii ' '] (List.take (length separated - 2) separated)
+                            time = intercalate [ascii ' '] (List.drop (length separated - 2) separated)
+
+                        in case parseOnly timestampP (toStrictByteString (BS.pack time)) of
+                            Right time -> return (UserStamp (map toChar info) time)
+                            Left err -> fail err
+                    else
+                        fail constErrorWrongTimestamp
+
+                timestampP = do
+                    time_raw <- many digit; space
+                    sign <- satisfy (inClass "+-")
+                    zone_raw <- count 4 digit
+                    
+                    time <- parseTimeM True defaultTimeLocale "%s" (map toChar time_raw)
+                    zone <- parseTimeM True defaultTimeLocale "%z" (map toChar (sign:zone_raw))
+
+                    return time {
+                        zonedTimeZone = zone
+                    }
+
+                stampsP = (do
+                        author <- authorP; committer <- committerP;
+                        return (author, committer))
+                    <|> (do
+                        committer <- committerP; author <- authorP;
+                        return (author, committer))
+
+        objectP :: Parser Object
+        objectP = do
+            header <- map toChar  <$> many letter
+            space
+            length <- many digit
+            word8 0
+
+            if header == constObjectBlobHeader then
+                blobObjectP
+            else if header == constObjectTreeHeader then
+                treeObjectP
+            else if header == constObjectCommitHeader then
+                commitObjectP
+            else
+                fail (constErrorNoSuchObjectType header)

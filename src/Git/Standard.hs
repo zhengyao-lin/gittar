@@ -5,8 +5,9 @@
 module Git.Standard where
 
 import qualified Data.HashMap.Strict as Map
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BS
 
+import Control.Monad
 import Control.Monad.State
 
 import System.Directory
@@ -21,14 +22,17 @@ import Git.Standard.Consts
 data StandardRepo = StandardRepo {
     repoConfig :: StandardConfig,
     rootPath   :: FilePath,
-    storeCache :: Map.HashMap ObjectHash Object
+    storeCache :: Map.HashMap ObjectHash (IO Object)
 }
 
 type StandardRepoState = StateT StandardRepo IO
 
 instance RepoState StandardRepoState where
-    getObject hash = do
-        fmap (Map.lookup hash . storeCache) get
+    getObject hash =
+        fmap (Map.lookup hash . storeCache) get >>= \mobj ->
+            case mobj of
+                Just io -> fmap Just (liftIO io)
+                Nothing -> return Nothing
 
     addObject obj = do
         let hash = hashObject obj
@@ -36,7 +40,7 @@ instance RepoState StandardRepoState where
         writeObject hash obj
 
         modify $ \s -> s {
-            storeCache = Map.insert hash obj (storeCache s)
+            storeCache = Map.insert hash (return obj) (storeCache s)
         }
 
         return hash
@@ -53,10 +57,42 @@ openStandardRepo path = do
         Right config -> return config
         Left err -> fail err
 
+    -- traverse the object directory to find all objects
+    let objects_path = path </> constGitDirectory </> constObjectsDirectory
+
+    indices <- listDirectory objects_path
+
+    objects <- fmap concat $ forM indices $ \index -> do
+        suffixes <- listDirectory (objects_path </> index)
+
+        let valid hash = case maybeRead hash :: Maybe ObjectHash of
+                Just _ -> True
+                Nothing -> False
+        
+            -- filter out invalid suffixes
+            valid_suffixes = filter (valid . (index ++)) suffixes
+
+        -- the object is not immediately read and parsed
+        -- it would be stored as an IO action and read later(but would be cached once read)
+        forM valid_suffixes $ \suffix -> do
+            io_obj <- once $ do
+                let path = objects_path </> index </> suffix
+                
+                compressed <- BS.readFile path
+
+                case zlibDecompress compressed of
+                    Just raw -> case parseObject raw of
+                        Right obj -> return obj
+                        Left err -> fail (constErrorFailedParseObject path err)
+
+                    Nothing -> fail (constErrorFailedDecompressObject path)
+
+            return (read (index ++ suffix), io_obj)
+
     return StandardRepo {
         repoConfig = config,
         rootPath = path,
-        storeCache = Map.empty -- might not be the full representation of the object store
+        storeCache = Map.fromList objects
     }
 
 getObjectPath :: ObjectHash -> StandardRepoState (FilePath, FilePath)
