@@ -5,7 +5,7 @@
 module Git.Standard where
 
 import qualified Data.HashMap.Strict as Map
-import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString.Lazy as LBS
 
 import Control.Monad
 import Control.Monad.State
@@ -78,7 +78,7 @@ openStandardRepo path = do
             io_obj <- once $ do
                 let path = objects_path </> index </> suffix
                 
-                compressed <- BS.readFile path
+                compressed <- LBS.readFile path
 
                 case zlibDecompress compressed of
                     Just raw -> case parseObject raw of
@@ -115,4 +115,4 @@ writeObject hash obj = do
     (dir, fname) <- getObjectPath hash
 
     liftIO $ createDirectoryIfMissing False dir
-    liftIO $ BS.writeFile (dir </> fname) compressed
+    liftIO $ LBS.writeFile (dir </> fname) compressed

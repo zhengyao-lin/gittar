@@ -3,7 +3,7 @@
 module Main where
 
 import Data.Time
-import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString.Lazy as LBS
 
 import Control.Monad.State
 
@@ -39,15 +39,16 @@ main = do
 
         encoded = encodeObject commit
 
+    putStrLn (decodeUTF8 $ toStrictByteString $ encoded)
     putStrLn (show $ hashObject commit)
 
     case parseObject encoded of
         Right obj -> putStrLn (show obj)
-        Left obj -> putStrLn (show obj)
+        Left err -> putStrLn (show err)
 
 test :: IO ()
 test = do
-    cont <- BS.readFile "../dummy/.git/objects/db/7559db3bd70aefdf39d3c70cfc0095ce340a7d"
+    cont <- LBS.readFile "../dummy/.git/objects/db/7559db3bd70aefdf39d3c70cfc0095ce340a7d"
 
     let Just decompressed = zlibDecompress cont
 
@@ -88,7 +89,7 @@ test = do
 
             Just (Blob file) <- getObject (read "6c5d4031e03408e34ae476c5053ee497a91ac37b")
             
-            liftIO $ putStrLn (printf "file size %d" (BS.length file))
+            liftIO $ putStrLn (printf "file size %d" (LBS.length file))
 
             listObjects
 

@@ -1,7 +1,5 @@
 module Git.Repo where
 
-import Data.ByteString
-
 import Control.Monad
 
 import Git.Object
