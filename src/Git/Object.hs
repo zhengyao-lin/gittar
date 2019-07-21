@@ -13,7 +13,6 @@ import qualified Data.Char as Char
 import Data.List.Split
 import Data.Attoparsec.ByteString.Lazy as P
 
-import Data.Ascii.Word8 (ascii)
 import Data.Word8
 
 import Debug.Trace
@@ -32,6 +31,8 @@ data TreeEntry = TreeEntry TreeEntryMode StrictByteString ObjectHash deriving (S
 
 data UserStamp = UserStamp StrictByteString ZonedTime deriving (Show)
 
+data ObjectType = BlobType | TreeType | CommitType | TagType deriving (Show)
+
 data Object =
     Blob LazyByteString |
     Tree [TreeEntry] |
@@ -41,6 +42,13 @@ data Object =
         commitAuthor :: UserStamp,
         commitIssuer :: UserStamp,
         commitMsg    :: LazyByteString
+    } |
+    Tag {
+        tagObject :: ObjectHash,
+        tagType   :: ObjectType,
+        tagName   :: StrictByteString,
+        tagTagger :: UserStamp,
+        tagMsg    :: LazyByteString
     }
     deriving (Show)
 
@@ -89,6 +97,12 @@ encodeUserStamp (UserStamp info time) =
     encodeUTF8 (formatTime defaultTimeLocale "%s" time) <> " " <>
     encodeUTF8 (timeZoneOffsetString (zonedTimeZone time))
 
+encodeObjectType :: ObjectType -> BSB.Builder
+encodeObjectType BlobType = BSB.byteString constObjectBlobHeader
+encodeObjectType TreeType = BSB.byteString constObjectTreeHeader
+encodeObjectType CommitType = BSB.byteString constObjectCommitHeader
+encodeObjectType TagType = BSB.byteString constObjectTagHeader
+
 -- general encoding for all object types
 encodeObjectTemplate :: StrictByteString -> BSB.Builder -> BSB.Builder
 encodeObjectTemplate header cont =
@@ -100,13 +114,13 @@ encodeObject' (Blob cont) = encodeObjectTemplate constObjectBlobHeader (BSB.lazy
 encodeObject' (Tree entries) = encodeObjectTemplate constObjectTreeHeader cont
     where cont = mconcat (map encodeTreeEntry entries)
 
-encodeObject' (Commit {
+encodeObject' Commit {
     commitTree = tree,
     commitParent = mparent,
     commitAuthor = author,
     commitIssuer = committer,
     commitMsg = msg
-}) =
+} =
     encodeObjectTemplate constObjectCommitHeader cont
     where
         cont = headers <> "\n" <> BSB.lazyByteString msg
@@ -121,6 +135,22 @@ encodeObject' (Commit {
             parent <>
             BSB.byteString constCommitHeaderAuthor <> " " <> encodeUserStamp author <> "\n" <>
             BSB.byteString constCommitHeaderCommitter <> " " <> encodeUserStamp committer <> "\n"
+
+encodeObject' Tag {
+    tagObject = obj,
+    tagType = ttype,
+    tagName = name,
+    tagTagger = tagger,
+    tagMsg = msg
+} =
+    mconcat [
+        BSB.byteString constTagHeaderObject <> " " <> showByteStringBuilder obj <> "\n",
+        BSB.byteString constTagHeaderType <> " " <> encodeObjectType ttype <> "\n",
+        BSB.byteString constTagHeaderName <> " " <> BSB.byteString name <> "\n",
+        BSB.byteString constTagHeaderTagger <> " " <> encodeUserStamp tagger <> "\n",
+        "\n",
+        BSB.lazyByteString msg
+    ]
 
 encodeObject :: Object -> LazyByteString
 encodeObject =  BSB.toLazyByteString . encodeObject'
@@ -138,17 +168,27 @@ parseObject raw =
                 Left (constErrorBytesNotConsumed (LBS.length rest))
 
     where
+        isNewline = (== toAscii '\n')
+
         digit = satisfy isDigit <?> "digit"
         hexDigit = satisfy isHexDigit <?> "hex digit"
         space = satisfy isSpace <?> "space"
         letter = satisfy isAlpha <?> "letter"
-        newline = satisfy (== ascii '\n') <?> "newline"
+        newline = satisfy isNewline <?> "newline"
 
         blobObjectP :: Parser Object
         blobObjectP = fmap Blob takeLazyByteString
 
         objectHashP :: Parser ObjectHash
         objectHashP = fmap ObjectHash (P.take constHashLength)
+
+        objectHashTextP :: Parser ObjectHash
+        objectHashTextP = do
+            bs <- P.take (constHashLength * 2)
+
+            case maybeReadByteString bs of
+                Nothing -> fail constErrorParseHashText
+                Just h -> return h
 
         treeEntryP :: Parser TreeEntry
         treeEntryP = do
@@ -163,6 +203,33 @@ parseObject raw =
 
         treeObjectP :: Parser Object
         treeObjectP = fmap Tree (many treeEntryP <?> "tree entries")
+
+        userStampP = do
+            line <- manyTill anyWord8 newline <?> "user info"
+
+            let separated = splitOn [toAscii ' '] line
+            
+            if length separated >= 2 then
+                let info = intercalate [toAscii ' '] (List.take (length separated - 2) separated)
+                    time = intercalate [toAscii ' '] (List.drop (length separated - 2) separated)
+
+                in case parseOnly timestampP (SBS.pack time) of
+                    Right time -> return (UserStamp (SBS.pack info) time)
+                    Left err -> fail err
+            else
+                fail constErrorWrongTimestamp
+
+        timestampP = do
+            time_raw <- P.takeWhile isDigit; space
+            sign <- satisfy (inClass "+-") <?> "time zone sign"
+            zone_raw <- P.take 4 <?> "time zone delta"
+            
+            time <- parseTimeM True defaultTimeLocale "%s" (decodeUTF8 time_raw)
+            zone <- parseTimeM True defaultTimeLocale "%z" (decodeUTF8 (SBS.cons sign zone_raw))
+
+            return time {
+                zonedTimeZone = zone
+            }
 
         commitObjectP :: Parser Object
         commitObjectP = do
@@ -181,12 +248,12 @@ parseObject raw =
             where
                 treeP = do
                     string constCommitHeaderTree; space
-                    tree <- hashTextP; newline
+                    tree <- objectHashTextP; newline
                     return tree
 
                 parentP = do
                     string constCommitHeaderParent; space
-                    hash <- hashTextP; newline
+                    hash <- objectHashTextP; newline
                     return hash
 
                 authorP = do
@@ -199,33 +266,37 @@ parseObject raw =
                     stamp <- userStampP
                     return stamp
 
-                hashTextP = fmap (read . map toChar) (count (constHashLength * 2) hexDigit)
-                userStampP = do
-                    line <- manyTill anyWord8 newline <?> "user info"
+        tagObjectP :: Parser Object
+        tagObjectP = do
+            string constTagHeaderObject; space
+            obj <- objectHashTextP; newline
 
-                    let separated = splitOn [ascii ' '] line
-                    
-                    if length separated >= 2 then
-                        let info = intercalate [ascii ' '] (List.take (length separated - 2) separated)
-                            time = intercalate [ascii ' '] (List.drop (length separated - 2) separated)
+            string constTagHeaderType; space
+            header <- P.takeWhile (not . isNewline); newline
 
-                        in case parseOnly timestampP (SBS.pack time) of
-                            Right time -> return (UserStamp (SBS.pack info) time)
-                            Left err -> fail err
-                    else
-                        fail constErrorWrongTimestamp
+            ttype <-
+                if header == constObjectBlobHeader then
+                    return BlobType
+                else if header == constObjectTreeHeader then
+                    return TreeType
+                else if header == constObjectCommitHeader then
+                    return CommitType
+                else if header == constObjectTagHeader then
+                    return TagType
+                else
+                    fail (constErrorNoSuchObjectType (decodeUTF8 header))
 
-                timestampP = do
-                    time_raw <- P.takeWhile isDigit; space
-                    sign <- satisfy (inClass "+-") <?> "time zone sign"
-                    zone_raw <- P.take 4 <?> "time zone delta"
-                    
-                    time <- parseTimeM True defaultTimeLocale "%s" (decodeUTF8 time_raw)
-                    zone <- parseTimeM True defaultTimeLocale "%z" (decodeUTF8 (SBS.cons sign zone_raw))
+            string constTagHeaderName; space
+            name <- P.takeWhile (not . isNewline); newline
 
-                    return time {
-                        zonedTimeZone = zone
-                    }
+            string constCommitHeaderCommitter; space
+            tagger <- userStampP
+
+            newline
+
+            msg <- takeLazyByteString
+
+            return (Tag obj ttype name tagger msg)
 
         objectP :: Parser Object
         objectP = do
@@ -240,5 +311,7 @@ parseObject raw =
                 treeObjectP <?> "tree body"
             else if header == constObjectCommitHeader then
                 commitObjectP <?> "commit body"
+            else if header == constObjectTagHeader then
+                tagObjectP <?> "tag body"
             else
                 fail (constErrorNoSuchObjectType (decodeUTF8 header))

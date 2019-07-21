@@ -7,7 +7,6 @@ import qualified Data.ByteString.Lazy as LBS
 
 import Control.Monad.State
 
-import Text.Parsec
 import Text.Printf
 
 import Git.Object
@@ -32,8 +31,8 @@ main = do
         commit = Commit {
                 commitTree = tree_hash,
                 commitParent = Nothing,
-                commitAuthor = UserStamp "zhengyao <nobody@illinois.edu>" now,
-                commitIssuer = UserStamp "zhengyao <nobody@illinois.edu>" now,
+                commitAuthor = UserStamp "zhengyao lin <nobody@illinois.edu>" now,
+                commitIssuer = UserStamp "zhengyao lin <nobody@illinois.edu>" now,
                 commitMsg = "fix that"
             }
 

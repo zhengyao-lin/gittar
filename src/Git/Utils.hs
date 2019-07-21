@@ -1,5 +1,7 @@
 module Git.Utils where
 
+import Data.Word8
+import Data.Char
 import qualified Data.ByteString as SBS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Builder as BSB
@@ -62,14 +64,11 @@ maybeRead = fmap fst . listToMaybe . reads
     where listToMaybe (a:_) = Just a
           listToMaybe _ = Nothing
 
-toChar :: Enum a => a -> Char
-toChar = toEnum . fromEnum
+fromAscii :: Integral a => a -> Char
+fromAscii = chr . fromIntegral
 
--- stringToUTF8 :: String -> BS.ByteString
--- stringToUTF8 = BSU.fromString
-
--- UTF8toString :: StrictByteString -> String
--- UTF8toString = BSU.toString
+toAscii :: Integral a => Char -> a
+toAscii = fromIntegral . ord
 
 encodeUTF8 :: String -> BSB.Builder
 encodeUTF8 = BSB.byteString . BSU.fromString
@@ -86,3 +85,6 @@ showByteStringBuilder = BSB.byteString . showByteString
 
 readByteString :: Read a => StrictByteString -> a
 readByteString = read . BSU.toString
+
+maybeReadByteString :: Read a => StrictByteString -> Maybe a
+maybeReadByteString = maybeRead . BSU.toString
